@@ -1,0 +1,14 @@
+core
+core.*
+*.core
+# big ML artifacts — track with LFS if needed
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+wandb/
+outputs/
+logs/
+data/
+checkpoints/
