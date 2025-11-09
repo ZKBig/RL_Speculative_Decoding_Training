@@ -1,10 +1,11 @@
 set -x
+unset ROCR_VISIBLE_DEVICES
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export HYDRA_FULL_ERROR=1
-export HF_HOME=/work/hdd/bcjw/zwang33
+export HF_HOME=/work/hdd/bcjw/xsong3
 
-export WORKING_DIR="/u/zwang33/Spec-RL"
+export WORKING_DIR="/u/xsong3/myproj/RL_Speculative_Decoding_Training"
 export RUN_NAME=qwen3-4b-baseline
 export DATA_PATH=${WORKING_DIR}/data
 export LOG_PATH=${WORKING_DIR}/logs
@@ -38,7 +39,7 @@ TEST_FREQ=5
 NUM_GPU=4
 REWARD_FN_PATH=${WORKING_DIR}/custom_reward/verl_math_verify.py
 MODEL_PATH=Qwen/Qwen3-4B-Base
-CHECKPOINT_PATH=/u/zwang33/Spec-RL/ckpt/Qwen_4B_Base_Baseline
+CHECKPOINT_PATH=/work/hdd/bcjw/xsong3/ckpt/Qwen_4B_Base_Baseline
 
 
 generate_suffix() {
@@ -161,8 +162,8 @@ mkdir -p $CHECKPOINT_PATH/$RUN_NAME
 
 export RAY_memory_usage_threshold=0.99
 
-train_files="['/u/zwang33/Spec-RL/data/dapo_math/train.parquet','/u/zwang33/Spec-RL/data/lighteval-math/train.parquet']"
-test_files="['/u/zwang33/Spec-RL/data/amc/test.parquet','/u/zwang33/Spec-RL/data/aime2024/test.parquet','/u/zwang33/Spec-RL/data/aime2025/test.parquet','/u/zwang33/Spec-RL/data/math500/test.parquet']"
+train_files="['/u/xsong3/data/dapo_math/train.parquet','/u/xsong3/data/lighteval-math/train.parquet']"
+test_files="['/u/xsong3/data/amc/test.parquet','/u/xsong3/data/aime2024/test.parquet','/u/xsong3/data/aime2025/test.parquet','/u/xsong3/data/math500/test.parquet']"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \

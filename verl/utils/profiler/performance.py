@@ -13,8 +13,10 @@
 # limitations under the License.
 
 import datetime
+import json
 import inspect
 import logging
+import os
 from contextlib import contextmanager
 from typing import Any, Optional
 
@@ -83,12 +85,31 @@ class GPUMemoryLogger(DecoratorLoggerBase):
         else:
             rank = 0
         super().__init__(role, logger, level, rank, log_only_rank_0)
+        self.gpu_mem_log_file = os.environ.get("VERL_GPU_MEM_LOG_FILE", "").strip()
+        if self.gpu_mem_log_file:
+            try:
+                os.makedirs(os.path.dirname(self.gpu_mem_log_file), exist_ok=True)
+            except Exception:
+                self.gpu_mem_log_file = ""
 
     def __call__(self, decorated_function: callable):
         def f(*args, **kwargs):
             return self.log(decorated_function, *args, **kwargs)
 
         return f
+
+    def _emit(self, message: str, entry: dict[str, Any]):
+        if self.gpu_mem_log_file:
+            try:
+                entry["ts"] = datetime.datetime.now().timestamp()
+                entry["role"] = self.role
+                entry["rank"] = self.rank
+                with open(self.gpu_mem_log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        else:
+            self.logging_function(message)
 
     def log(self, func, *args, **kwargs):
         name = func.__name__
@@ -97,7 +118,15 @@ class GPUMemoryLogger(DecoratorLoggerBase):
             f"Before {name}, memory allocated (GB): {mem_allocated}, memory reserved (GB): {mem_reserved}, "
             f"device memory used/total (GB): {mem_used}/{mem_total}"
         )
-        self.logging_function(message)
+        entry = {
+            "stage": "before",
+            "function": name,
+            "mem_allocated_gb": float(mem_allocated),
+            "mem_reserved_gb": float(mem_reserved),
+            "mem_used_gb": float(mem_used),
+            "mem_total_gb": float(mem_total),
+        }
+        self._emit(message, entry)
 
         output = func(*args, **kwargs)
 
@@ -107,7 +136,15 @@ class GPUMemoryLogger(DecoratorLoggerBase):
             f"device memory used/total (GB): {mem_used}/{mem_total}"
         )
 
-        self.logging_function(message)
+        entry = {
+            "stage": "after",
+            "function": name,
+            "mem_allocated_gb": float(mem_allocated),
+            "mem_reserved_gb": float(mem_reserved),
+            "mem_used_gb": float(mem_used),
+            "mem_total_gb": float(mem_total),
+        }
+        self._emit(message, entry)
         return output
 
 

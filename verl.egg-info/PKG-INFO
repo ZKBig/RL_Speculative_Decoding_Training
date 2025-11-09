@@ -5,8 +5,7 @@ Summary: verl: Volcano Engine Reinforcement Learning for LLM
 Home-page: https://github.com/volcengine/verl
 Author: Bytedance - Seed - MLSys
 Author-email: zhangchi.usc1992@bytedance.com, gmsheng@connect.hku.hk
-License: Apache-2.0
-Requires-Python: >=3.10
+License: Apache 2.0
 Description-Content-Type: text/markdown
 License-File: LICENSE
 Requires-Dist: accelerate
@@ -56,10 +55,14 @@ Provides-Extra: mcore
 Requires-Dist: mbridge; extra == "mcore"
 Dynamic: author
 Dynamic: author-email
+Dynamic: description
+Dynamic: description-content-type
 Dynamic: home-page
+Dynamic: license
 Dynamic: license-file
 Dynamic: provides-extra
 Dynamic: requires-dist
+Dynamic: summary
 
 <div align="center">
   <img src="./assets/page.jpg" alt="Logo" width="500">

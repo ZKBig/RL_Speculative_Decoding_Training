@@ -30,6 +30,7 @@ import logging
 import os
 import pickle
 import socket
+import time
 import threading
 from contextlib import contextmanager
 from copy import deepcopy
@@ -44,6 +45,7 @@ import zmq
 from filelock import FileLock
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
+from prometheus_client import start_http_server
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest
@@ -75,6 +77,9 @@ def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> list[in
 
 
 class vLLMRollout(BaseRollout):
+    _prometheus_server_started = False
+    _prometheus_server_lock = threading.Lock()
+    
     def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
         """A vLLM rollout. It requires the module is supported by the vllm.
 
@@ -96,8 +101,6 @@ class vLLMRollout(BaseRollout):
 
         if kwargs.get("train_tp") is not None:
             # deployed with megatron
-            import os
-
             os.environ["CUDA_TIMER_STREAM_KAFKA_ENABLE"] = "0"
             os.environ["MEGATRON_IMPORT_TIMERS"] = "0"
             vllm_ps.initialize_model_parallel(tensor_model_parallel_size=tensor_parallel_size)
@@ -159,8 +162,22 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        
+        # Special handling for speculative_config: remove None values from nested dict
+        if "speculative_config" in engine_kwargs and isinstance(engine_kwargs["speculative_config"], dict):
+            engine_kwargs["speculative_config"] = {
+                k: v for k, v in engine_kwargs["speculative_config"].items() if v is not None
+            }
+            # If empty after filtering, remove it entirely
+            if not engine_kwargs["speculative_config"]:
+                del engine_kwargs["speculative_config"]
+        
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
+
+        # Debug: print speculative_config if present
+        if "speculative_config" in engine_kwargs:
+            logger.warning(f"vLLM speculative_config: {engine_kwargs['speculative_config']}")
 
         self.inference_engine = LLM(
             model=model_path,
@@ -183,6 +200,9 @@ class vLLMRollout(BaseRollout):
             **lora_kwargs,
             **engine_kwargs,
         )
+        # Optional: start a lightweight reporter (sync path) when WandB logging is requested
+        if os.environ.get("VERL_ENABLE_VLLM_BG_WANDB") == "1":
+            self._maybe_start_wandb_metrics_loop(self.config)
 
         # Offload vllm model to reduce peak memory usage
         if config.free_cache_engine:
@@ -205,6 +225,30 @@ class vLLMRollout(BaseRollout):
         self.sampling_params = SamplingParams(**kwargs)
 
         self.pad_token_id = tokenizer.pad_token_id
+        self._maybe_start_prometheus_endpoint()
+
+    @classmethod
+    def _maybe_start_prometheus_endpoint(cls):
+        """Expose Prometheus metrics on HTTP if VERL_PROMETHEUS_PORT is set."""
+        port_str = os.environ.get("VERL_PROMETHEUS_PORT", "").strip()
+        if not port_str:
+            return
+        try:
+            port = int(port_str)
+        except ValueError:
+            logger.warning("Invalid VERL_PROMETHEUS_PORT=%s, skip starting prometheus endpoint.", port_str)
+            return
+        addr = os.environ.get("VERL_PROMETHEUS_ADDR", "").strip() or "0.0.0.0"
+
+        with cls._prometheus_server_lock:
+            if cls._prometheus_server_started:
+                return
+            try:
+                start_http_server(port, addr=addr)
+                logger.info("Started Prometheus metrics endpoint at %s:%d", addr, port)
+                cls._prometheus_server_started = True
+            except Exception as exc:
+                logger.warning("Failed to start Prometheus endpoint at %s:%d: %s", addr, port, exc)
 
     @contextmanager
     def update_sampling_params(self, **kwargs):

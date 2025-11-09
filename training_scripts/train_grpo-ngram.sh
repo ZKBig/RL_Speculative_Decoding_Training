@@ -1,0 +1,259 @@
+set -x
+unset ROCR_VISIBLE_DEVICES
+
+export VLLM_USE_V1=1
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export HYDRA_FULL_ERROR=1
+export HF_HOME=/work/hdd/bcjw/xsong3
+
+export WORKING_DIR="/u/xsong3/myproj/RL_Speculative_Decoding_Training"
+export RUN_NAME=qwen3-4b-spec-ngram
+export DATA_PATH=${WORKING_DIR}/data
+export LOG_PATH=${WORKING_DIR}/logs
+mkdir -p $LOG_PATH
+
+# NGRAM draft model defaults
+NGRAM_MIN=${NGRAM_MIN:-2}
+NGRAM_MAX=${NGRAM_MAX:-18}
+NGRAM_NUM_SPEC_TOKENS=${NGRAM_NUM_SPEC_TOKENS:-8}
+
+# Default values
+PROJECT_NAME=grpo-qwen-4B-spec-ngram
+TRAIN_FILE_NAME=train
+TRAIN_BATCH_SIZE=128
+MAX_PROMPT_LENGTH=1024
+MAX_RESPONSE_LENGTH=4096
+LEARNING_RATE=1e-6
+PPO_MINI_BATCH_SIZE=64
+PPO_MICRO_BATCH_SIZE=2
+KL_LOSS_COEF=0.0001
+KL_COEF=0.000
+ENTROPY_COEFFIENT=0.001
+KL_LOSS_TYPE="low_var_kl"
+LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=16
+ROLLOUT_N=8
+ROLLOUT_NAME=vllm
+ROLLOUT_GPU_MEMORY_UTIL=0.7
+ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=2
+TOTAL_EPOCHS=15
+TOTAL_STEPS=400
+DATASET_NAME=simplelr_math_35
+MODEL_NAME=Qwen3-4B-Base
+SAVE_FREQ=500
+TEST_FREQ=5
+NUM_GPU=4
+REWARD_FN_PATH=${WORKING_DIR}/custom_reward/verl_math_verify.py
+MODEL_PATH=Qwen/Qwen3-4B-Base
+CHECKPOINT_PATH=/work/hdd/bcjw/xsong3/ckpt/Qwen_4B_Base_Baseline
+
+export WANDB_PROJECT="$PROJECT_NAME"
+export WANDB_RUN_NAME="$RUN_NAME"
+export WANDB_RUN_ID="$RUN_NAME"
+export WANDB_RESUME=allow
+
+# Save vLLM metrics locally every 5s (JSONL). Override by exporting before run.
+export VERL_VLLM_METRICS_FILE="${VERL_VLLM_METRICS_FILE:-$LOG_PATH/$RUN_NAME.vllm_metrics.jsonl}"
+# Enable GPU memory decorator logs to be visible
+export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-DEBUG}"
+# Save aggregated accept length to a separate JSONL
+export VERL_ACCEPT_LOG_FILE="${VERL_ACCEPT_LOG_FILE:-$LOG_PATH/$RUN_NAME.accept.jsonl}"
+# Save GPU memory snapshots to JSONL
+export VERL_GPU_MEM_LOG_FILE="${VERL_GPU_MEM_LOG_FILE:-$LOG_PATH/$RUN_NAME.gpu_mem.jsonl}"
+# Expose Prometheus metrics endpoint (port/address overridable); empty string disables.
+export VERL_PROMETHEUS_PORT="${VERL_PROMETHEUS_PORT:-9108}"
+export VERL_PROMETHEUS_ADDR="${VERL_PROMETHEUS_ADDR:-0.0.0.0}"
+
+FORWARDER_SCRIPT="$(dirname "$WORKING_DIR")/tools/forward_metrics.py"
+if [ "${VERL_METRICS_FORWARDER:-1}" != "0" ] && [ -f "$FORWARDER_SCRIPT" ]; then
+  FORWARDER_OUTFILE="${VERL_METRICS_FORWARDER_OUTFILE:-$LOG_PATH/$RUN_NAME.spec_mem_metrics.jsonl}"
+  FORWARDER_PORT="${VERL_METRICS_FORWARDER_PORT:-9208}"
+  FORWARDER_INTERVAL="${VERL_METRICS_FORWARDER_INTERVAL:-60}"
+  FORWARDER_ADDR="${VERL_METRICS_FORWARDER_ADDR:-0.0.0.0}"
+  python "$FORWARDER_SCRIPT" \
+    --source "http://127.0.0.1:${VERL_PROMETHEUS_PORT}/metrics" \
+    --outfile "$FORWARDER_OUTFILE" \
+    --interval "$FORWARDER_INTERVAL" \
+    --listen-addr "$FORWARDER_ADDR" \
+    --listen-port "$FORWARDER_PORT" \
+    >/dev/null 2>&1 &
+  METRICS_FORWARDER_PID=$!
+  trap 'if [ -n "${METRICS_FORWARDER_PID:-}" ]; then kill "${METRICS_FORWARDER_PID}" 2>/dev/null; fi' EXIT
+fi
+
+
+generate_suffix() {
+  local suffix=""
+  local dataset_provided=false
+  local model_provided=false
+  local suffix_provided=false
+
+  while [[ "$#" -gt 0 ]]; do
+    case $1 in
+      --train_batch_size) suffix+="_batch$2"; shift 2 ;;
+      --val_batch_size) suffix+="_valbatch$2"; shift 2 ;;
+      --max_prompt_length) suffix+="_max_prompt$2"; shift 2 ;;
+      --max_response_length) suffix+="_max_response$2"; shift 2 ;;
+      --learning_rate) suffix+="_lr$2"; shift 2 ;;
+      --ppo_mini_batch_size) suffix+="_ppomini$2"; shift 2 ;;
+      --kl_loss_coef) suffix+="_klcoef$2"; shift 2 ;;
+      --entropy_coeffient) suffix+="_entcoef$2"; shift 2 ;;
+      --clip_ratio) suffix+="_clipratio$2"; shift 2 ;;
+      --kl_loss_type) suffix+="_kltype$2"; shift 2 ;;
+      --temperature) suffix+="_temp$2"; shift 2 ;;
+      --log_prob_micro_batch_size) suffix+="_logprobbatch$2"; shift 2 ;;
+      --rollout_n) suffix+="_rollout$2"; shift 2 ;;
+      --rollout_name) suffix+="_$2"; shift 2 ;;
+      --kl_coef) suffix+="_klcontrol$2"; shift 2 ;;
+      --dataset_name) suffix+="_$2"; dataset_provided=true; shift 2 ;;
+      --model_name) model_name_sanitized=$(echo "$2" | tr '/' '_'); suffix+="_$model_name_sanitized"; model_provided=true; shift 2 ;;
+      --remove_clip) suffix+="_remove_clip$2"; shift 2 ;;
+      --train_file_name) suffix+="_$2"; shift 2 ;;
+      --suffix) input_suffix="$2"; suffix_provided=true; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  if [ "$dataset_provided" = false ]; then
+    suffix+="_$DATASET_NAME"
+  fi
+
+  if [ "$model_provided" = false ]; then
+    model_name_sanitized=$(echo "$MODEL_NAME" | tr '/' '_')
+    suffix+="_$model_name_sanitized"
+  fi
+
+  if [ "$suffix_provided" = true ]; then
+    suffix+="_$input_suffix"
+  fi
+  
+  echo "$suffix"
+}
+
+echo "Arguments received: $@"
+
+
+SUFFIX=$(generate_suffix "$@")
+RUN_NAME="$RUN_NAME$SUFFIX"
+LOG_FILE_PATH="$LOG_PATH/$RUN_NAME.log"
+
+
+# Parse named arguments
+while [[ "$#" -gt 0 ]]; do
+  echo "Processing: $1"
+  case "$1" in
+    --train_batch_size) TRAIN_BATCH_SIZE="$2"; shift 2 ;;
+    --max_prompt_length) MAX_PROMPT_LENGTH="$2"; shift 2 ;;
+    --max_response_length) MAX_RESPONSE_LENGTH="$2"; shift 2 ;;
+    --learning_rate) LEARNING_RATE="$2"; shift 2 ;;
+    --ppo_mini_batch_size) PPO_MINI_BATCH_SIZE="$2"; shift 2 ;;
+    --ppo_micro_batch_size) PPO_MICRO_BATCH_SIZE="$2"; shift 2 ;;
+    --kl_loss_coef) KL_LOSS_COEF="$2"; shift 2 ;;
+    --entropy_coeffient) ENTROPY_COEFFIENT="$2"; shift 2 ;;
+    --kl_loss_type) KL_LOSS_TYPE="$2"; shift 2 ;;
+    --rollout_n) ROLLOUT_N="$2"; shift 2 ;;
+    --rollout_name) ROLLOUT_NAME="$2"; shift 2 ;;
+    --rollout_gpu_memory_util) ROLLOUT_GPU_MEMORY_UTIL="$2"; shift 2 ;;
+    --rollout_tp) ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE="$2"; shift 2 ;;
+    --kl_coef) KL_COEF="$2"; shift 2 ;;
+    --total_epochs) TOTAL_EPOCHS="$2"; shift 2 ;;
+    --total_steps) TOTAL_STEPS="$2"; shift 2 ;;
+    --dataset_name) DATASET_NAME="$2"; shift 2 ;;
+    --model_path) MODEL_PATH="$2"; shift 2 ;;
+    --model_name) MODEL_NAME="$2"; shift 2 ;;
+    --save_freq) SAVE_FREQ="$2"; shift 2 ;;
+    --test_freq) TEST_FREQ="$2"; shift 2 ;;
+    --train_file_name) TRAIN_FILE_NAME="$2"; shift 2 ;;
+    --num_gpu) NUM_GPU="$2"; shift 2 ;;
+    --project_name) PROJECT_NAME="$2"; shift 2 ;;
+    --checkpoint_path) CHECKPOINT_PATH="$2"; shift 2 ;;
+    --suffix) SUFFIX="$2"; shift 2 ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+
+echo "Training with the following parameters:"
+echo "Train File Name: $TRAIN_FILE_NAME.parquet"
+echo "Train Batch Size: $TRAIN_BATCH_SIZE"
+echo "Max Prompt Length: $MAX_PROMPT_LENGTH" 
+echo "Max Response Length: $MAX_RESPONSE_LENGTH" 
+echo "Learning Rate: $LEARNING_RATE" 
+echo "PPO Mini Batch Size: $PPO_MINI_BATCH_SIZE" 
+echo "PPO Micro Batch Size: $PPO_MICRO_BATCH_SIZE" 
+echo "KL Loss Coefficient: $KL_LOSS_COEF" 
+echo "KL Loss Type: $KL_LOSS_TYPE" 
+echo "Rollout N: $ROLLOUT_N" 
+echo "KL Coefficient: $KL_COEF" 
+echo "Total Epochs: $TOTAL_EPOCHS"
+echo "Total Training Steps: $TOTAL_STEPS"
+echo "Dataset Name: $DATASET_NAME"
+echo "Model Name: $MODEL_NAME"
+echo "Log File Path: $LOG_FILE_PATH"
+echo "Rollout Name: $ROLLOUT_NAME"
+echo "Num GPU: $NUM_GPU"
+echo "Checkpoint Path: $CHECKPOINT_PATH"
+
+mkdir -p $CHECKPOINT_PATH
+mkdir -p $CHECKPOINT_PATH/$RUN_NAME
+
+export RAY_memory_usage_threshold=0.99
+
+train_files="['/u/xsong3/data/dapo_math/train.parquet','/u/xsong3/data/lighteval-math/train.parquet']"
+test_files="['/u/xsong3/data/amc/test.parquet','/u/xsong3/data/aime2024/test.parquet','/u/xsong3/data/aime2025/test.parquet','/u/xsong3/data/math500/test.parquet']"
+
+python3 -m verl.trainer.main_ppo \
+    algorithm.adv_estimator=grpo \
+    data.train_files="$train_files" \
+    data.val_files="$test_files" \
+    data.train_batch_size=$TRAIN_BATCH_SIZE \
+    data.max_prompt_length=$MAX_PROMPT_LENGTH \
+    data.max_response_length=$MAX_RESPONSE_LENGTH \
+    data.filter_overlong_prompts=True \
+    data.truncation='error' \
+    actor_rollout_ref.model.path=$MODEL_PATH \
+    actor_rollout_ref.actor.optim.lr=$LEARNING_RATE \
+    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.actor.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE \
+    actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.use_dynamic_bsz=True \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.actor.kl_loss_coef=$KL_LOSS_COEF \
+    actor_rollout_ref.actor.kl_loss_type=$KL_LOSS_TYPE \
+    actor_rollout_ref.actor.entropy_coeff=$ENTROPY_COEFFIENT \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.actor.fsdp_config.param_offload=False \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE \
+    actor_rollout_ref.rollout.name=$ROLLOUT_NAME \
+    actor_rollout_ref.rollout.gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTIL \
+    actor_rollout_ref.rollout.n=$ROLLOUT_N \
+    actor_rollout_ref.rollout.disable_log_stats=False \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU \
+    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    algorithm.kl_ctrl.kl_coef=$KL_COEF \
+    custom_reward_function.path=$REWARD_FN_PATH \
+    trainer.critic_warmup=0 \
+    trainer.logger=['console','wandb'] \
+    trainer.project_name=$PROJECT_NAME \
+    trainer.experiment_name=$RUN_NAME \
+    trainer.rollout_data_dir=$WORKING_DIR/rollouts/$RUN_NAME \
+    trainer.n_gpus_per_node=$NUM_GPU \
+    trainer.nnodes=1 \
+    trainer.save_freq=$SAVE_FREQ \
+    trainer.test_freq=$TEST_FREQ \
+    trainer.val_before_train=True \
+    trainer.default_local_dir=$CHECKPOINT_PATH/$RUN_NAME \
+    trainer.total_training_steps=$TOTAL_STEPS \
+    trainer.total_epochs=$TOTAL_EPOCHS \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.speculative_config.method=ngram \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.speculative_config.model=\"[ngram]\" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.speculative_config.prompt_lookup_max=$NGRAM_MAX \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.speculative_config.prompt_lookup_min=$NGRAM_MIN \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.speculative_config.num_speculative_tokens=$NGRAM_NUM_SPEC_TOKENS \
+    actor_rollout_ref.rollout.enable_chunked_prefill=False 2>&1 | tee -a "$LOG_FILE_PATH"

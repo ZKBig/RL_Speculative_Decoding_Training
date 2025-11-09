@@ -1,18 +1,19 @@
 set -x
 
+unset ROCR_VISIBLE_DEVICES
+
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export HYDRA_FULL_ERROR=1
-export HF_HOME=/work/hdd/bcjw/zwang33
+export HF_HOME=/work/hdd/bcjw/xsong3/huggingface
 
-export WORKING_DIR="/u/zwang33/Spec-RL"
-export RUN_NAME=qwen3-4b-SD
+export WORKING_DIR="/u/xsong3/myproj/RL_Speculative_Decoding_Training"
+export RUN_NAME=qwen3-4b-SD-new-metrics
 export DATA_PATH=${WORKING_DIR}/data
 export LOG_PATH=${WORKING_DIR}/logs
 mkdir -p $LOG_PATH
 
-
 # Default values
-PROJECT_NAME=verl-grpo-qwen-4B-base-SD
+PROJECT_NAME=verl-grpo-qwen-4B-base-SD-new-try-metrics
 TRAIN_FILE_NAME=train
 TRAIN_BATCH_SIZE=128
 MAX_PROMPT_LENGTH=1024
@@ -38,7 +39,12 @@ TEST_FREQ=5
 NUM_GPU=4
 REWARD_FN_PATH=${WORKING_DIR}/custom_reward/verl_math_verify.py
 MODEL_PATH=Qwen/Qwen3-4B-Base
-CHECKPOINT_PATH=/u/zwang33/Spec-RL/ckpt/Qwen3-4B-SD
+CHECKPOINT_PATH=/work/hdd/bcjw/xsong3/ckpt/Qwen3-4B-SD
+
+export WANDB_PROJECT="$PROJECT_NAME"
+export WANDB_RUN_NAME="$RUN_NAME"
+export WANDB_RUN_ID="$RUN_NAME"
+export WANDB_RESUME=allow
 
 
 generate_suffix() {
@@ -161,8 +167,8 @@ mkdir -p $CHECKPOINT_PATH/$RUN_NAME
 
 export RAY_memory_usage_threshold=0.99
 
-train_files="['/u/zwang33/Spec-RL/data/dapo_math/train.parquet','/u/zwang33/Spec-RL/data/lighteval-math/train.parquet']"
-test_files="['/u/zwang33/Spec-RL/data/amc/test.parquet','/u/zwang33/Spec-RL/data/aime2024/test.parquet','/u/zwang33/Spec-RL/data/aime2025/test.parquet','/u/zwang33/Spec-RL/data/math500/test.parquet']"
+train_files="['/u/xsong3/data/dapo_math/train.parquet','/u/xsong3/data/lighteval-math/train.parquet']"
+test_files="['/u/xsong3/data/amc/test.parquet','/u/xsong3/data/aime2024/test.parquet','/u/xsong3/data/aime2025/test.parquet','/u/xsong3/data/math500/test.parquet']"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -193,6 +199,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=$ROLLOUT_NAME \
     actor_rollout_ref.rollout.gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTIL \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
+    actor_rollout_ref.rollout.disable_log_stats=False \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$LOG_PROB_MICRO_BATCH_SIZE_PER_GPU \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.kl_ctrl.kl_coef=$KL_COEF \

@@ -1301,6 +1301,33 @@ class RayPPOTrainer:
         # align with the current global steps, maybe only previous steps files
         # bsliu - add init logic here
 
+        # Helper: collect per-GPU and aggregated memory usage using NVML (best-effort)
+        def _append_gpu_memory_metrics(target_metrics: dict) -> None:
+            try:
+                import pynvml  # type: ignore
+                pynvml.nvmlInit()
+                n = pynvml.nvmlDeviceGetCount()
+                used_total = 0
+                cap_total = 0
+                ratios = []
+                for i in range(n):
+                    h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+                    used_total += mem.used
+                    cap_total += mem.total
+                    ratio = float(mem.used) / float(mem.total) if mem.total else 0.0
+                    ratios.append(ratio)
+                    target_metrics[f"gpu/mem_used_gb/{i}"] = float(mem.used) / (1024**3)
+                    target_metrics[f"gpu/mem_total_gb/{i}"] = float(mem.total) / (1024**3)
+                    target_metrics[f"gpu/mem_used_ratio/{i}"] = ratio
+                if cap_total > 0:
+                    target_metrics["gpu/mem_used_total_gb"] = float(used_total) / (1024**3)
+                    target_metrics["gpu/mem_total_total_gb"] = float(cap_total) / (1024**3)
+                    target_metrics["gpu/mem_used_mean_ratio"] = float(sum(ratios) / len(ratios)) if ratios else 0.0
+            except Exception:
+                # Silently ignore if NVML is unavailable
+                pass
+
         time_accumulation = 0.0
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -1489,6 +1516,14 @@ class RayPPOTrainer:
                         if gen_batch.batch['input_ids'].shape[0] != 0:
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
+                            # Merge vLLM metrics into main metrics for W&B logging
+                            try:
+                                vllm_metrics = gen_batch_output.meta_info.get("vllm_metrics", None)
+                                if vllm_metrics:
+                                    metrics.update(vllm_metrics)
+                                    gen_batch_output.meta_info.pop("vllm_metrics", None)
+                            except Exception:
+                                pass
                     print(f'generation time: {time.time() - start}')
 
                     if spec_decoding:
@@ -1745,40 +1780,41 @@ class RayPPOTrainer:
                     print(f'update actor time: {time.time() - start}')
 
                     # Log rollout generations if enabled
-                    # rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    # if rollout_data_dir:
-                    #     with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                    #         inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                    #         outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                    #         scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                    #         if "request_id" in batch.non_tensor_batch:
-                    #             reward_extra_infos_dict.setdefault(
-                    #                 "request_id",
-                    #                 batch.non_tensor_batch["request_id"].tolist(),
-                    #             )
-                    #         self._dump_generations(
-                    #             inputs=inputs,
-                    #             outputs=outputs,
-                    #             scores=scores,
-                    #             reward_extra_infos_dict=reward_extra_infos_dict,
-                    #             dump_path=rollout_data_dir,
-                    #         )
-                    #         sid = ((self.global_steps - 1) % self.num_buckets) + 1
-                    #         self.latest_old_policy[sid].append(os.path.join(rollout_data_dir, f"{self.global_steps}.jsonl"))
-                    #         spec_decoding = self.config.trainer.get("spec_decoding", False)
-                    #         if spec_decoding:
-                    #             self._dump_generations_pt(
-                    #                 inputs=inputs,
-                    #                 outputs=outputs,
-                    #                 scores=scores,
-                    #                 log_probs=old_log_prob.batch['old_log_probs'],
-                    #                 reward_extra_infos_dict=reward_extra_infos_dict,
-                    #                 dump_path=rollout_data_dir,
-                    #                 response_masks=batch.batch["response_mask"],
-                    #                 responses=batch.batch["responses"],
-                    #                 position_ids=batch.batch["position_ids"],
-                    #             )
-                    #             self.latest_old_policy_tensor[sid].append(os.path.join(rollout_data_dir, f"{self.global_steps}.pt"))
+                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    if rollout_data_dir:
+                        with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+                            reward_extra_infos_dict = {}
+                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+                            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            if "request_id" in batch.non_tensor_batch:
+                                reward_extra_infos_dict.setdefault(
+                                    "request_id",
+                                    batch.non_tensor_batch["request_id"].tolist(),
+                                )
+                            self._dump_generations(
+                                inputs=inputs,
+                                outputs=outputs,
+                                scores=scores,
+                                reward_extra_infos_dict=reward_extra_infos_dict,
+                                dump_path=rollout_data_dir,
+                            )
+                            sid = ((self.global_steps - 1) % self.num_buckets) + 1
+                            self.latest_old_policy[sid].append(os.path.join(rollout_data_dir, f"{self.global_steps}.jsonl"))
+                            spec_decoding = self.config.trainer.get("spec_decoding", False)
+                            if spec_decoding:
+                                self._dump_generations_pt(
+                                    inputs=inputs,
+                                    outputs=outputs,
+                                    scores=scores,
+                                    log_probs=old_log_prob.batch['old_log_probs'],
+                                    reward_extra_infos_dict=reward_extra_infos_dict,
+                                    dump_path=rollout_data_dir,
+                                    response_masks=batch.batch["response_mask"],
+                                    responses=batch.batch["responses"],
+                                    position_ids=batch.batch["position_ids"],
+                                )
+                                self.latest_old_policy_tensor[sid].append(os.path.join(rollout_data_dir, f"{self.global_steps}.pt"))
 
                     # validate
                     if (
@@ -1839,6 +1875,9 @@ class RayPPOTrainer:
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
                     self.train_dataloader.sampler.update(batch=batch)
+
+                # Append overall GPU memory metrics (device-level) for WandB
+                _append_gpu_memory_metrics(metrics)
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
