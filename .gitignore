@@ -10,6 +10,7 @@ core.*
 wandb/
 outputs/
 logs/
+rollouts/
 data/
 checkpoints/
 

@@ -162,22 +162,8 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
-        
-        # Special handling for speculative_config: remove None values from nested dict
-        if "speculative_config" in engine_kwargs and isinstance(engine_kwargs["speculative_config"], dict):
-            engine_kwargs["speculative_config"] = {
-                k: v for k, v in engine_kwargs["speculative_config"].items() if v is not None
-            }
-            # If empty after filtering, remove it entirely
-            if not engine_kwargs["speculative_config"]:
-                del engine_kwargs["speculative_config"]
-        
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
-
-        # Debug: print speculative_config if present
-        if "speculative_config" in engine_kwargs:
-            logger.warning(f"vLLM speculative_config: {engine_kwargs['speculative_config']}")
 
         self.inference_engine = LLM(
             model=model_path,
